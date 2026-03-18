@@ -1,0 +1,33 @@
+template:
+  name: test-123
+  identifier: test123
+  versionLabel: v1
+  type: Pipeline
+  projectIdentifier: testproj
+  orgIdentifier: testprameet
+  tags: {}
+  spec:
+    stages:
+      - stage:
+          name: sdfgh
+          identifier: sdfgh
+          description: ""
+          type: Custom
+          spec:
+            execution:
+              steps:
+                - step:
+                    type: ShellScript
+                    name: ShellScript_1
+                    identifier: ShellScript_1
+                    spec:
+                      shell: Bash
+                      executionTarget: {}
+                      source:
+                        type: Inline
+                        spec:
+                          script: echo "assas"
+                      environmentVariables: []
+                      outputVariables: []
+                    timeout: 10m
+          tags: {}
