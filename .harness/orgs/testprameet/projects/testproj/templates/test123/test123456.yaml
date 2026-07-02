@@ -1,6 +1,6 @@
 template:
-  name: test-1234567
-  identifier: test1234567
+  name: test-123456778
+  identifier: test123456778
   versionLabel: v1
   type: Pipeline
   projectIdentifier: testproj
