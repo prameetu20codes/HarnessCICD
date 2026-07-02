@@ -9,8 +9,8 @@ template:
   spec:
     stages:
       - stage:
-          name: sdfgh
-          identifier: sdfgh
+        name: sdfg
+        identifier: sdfgh
           description: ""
           type: Custom
           spec:
