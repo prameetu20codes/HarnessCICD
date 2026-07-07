@@ -19,7 +19,7 @@ routes:
                           "comment": "BROKEN under Harness -> becomes \"condition\": \"false\"",
                           "type": "ConditionEnforcementFilter",
                           "config": {
-                              "condition": "${request.headers['client_id'][0] != null && request.headers['client_id'][0] != ''}",
+                              "condition": "$${not empty request.headers['client_id'][0]}",
                               "failureHandler": {
                                   "type": "StaticResponseHandler",
                                   "config": {
