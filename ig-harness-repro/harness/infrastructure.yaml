@@ -1,0 +1,13 @@
+infrastructureDefinition:
+  name: ig-repro-k8s
+  identifier: ig_repro_k8s
+  orgIdentifier: <+input>
+  projectIdentifier: <+input>
+  environmentRef: ig_repro_dev
+  deploymentType: Kubernetes
+  type: KubernetesDirect
+  spec:
+    connectorRef: <+input>       # your Kubernetes cluster connector
+    namespace: ig-repro
+    releaseName: release-<+INFRA_KEY_SHORT_ID>
+  allowSimultaneousDeployments: false

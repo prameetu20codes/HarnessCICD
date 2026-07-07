@@ -1,0 +1,7 @@
+environment:
+  name: ig-repro-dev
+  identifier: ig_repro_dev
+  type: PreProduction
+  orgIdentifier: <+input>
+  projectIdentifier: <+input>
+  variables: []

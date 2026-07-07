@@ -1,0 +1,6 @@
+apiVersion: v2
+name: ig-routes
+description: Minimal repro of ForgeRock IG route ConfigMaps + Harness ${...} JEXL expression collision
+type: application
+version: 0.1.0
+appVersion: "1.0.0"

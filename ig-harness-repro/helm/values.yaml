@@ -1,0 +1,70 @@
+# Repro values for the Harness ${...} JEXL expression collision.
+#
+# After Harness renders this (Kubernetes deployment type), inspect the produced
+# ConfigMap. You will see that ONLY the "not empty" condition is rewritten to
+# "false", while every other ${...} condition is preserved verbatim.
+#
+# Local `helm template` (v3 or v4) preserves ALL of them - proving the rewrite
+# is done by Harness's JEXL manifest evaluator, not by Helm.
+routes:
+  routes-1:
+    10-repro-broken.json: |-
+      {
+          "name": "10-repro-broken",
+          "handler": {
+              "type": "Chain",
+              "config": {
+                  "filters": [
+                      {
+                          "comment": "BROKEN under Harness -> becomes \"condition\": \"false\"",
+                          "type": "ConditionEnforcementFilter",
+                          "config": {
+                              "condition": "${not empty request.headers['client_id'][0]}",
+                              "failureHandler": {
+                                  "type": "StaticResponseHandler",
+                                  "config": {
+                                      "status": 400,
+                                      "reason": "Missing Client ID"
+                                  }
+                              }
+                          }
+                      },
+                      {
+                          "comment": "CONTROL A - survives Harness (comparison on unknown var throws in JEXL)",
+                          "type": "ConditionEnforcementFilter",
+                          "config": {
+                              "condition": "${request.method == 'POST'}",
+                              "failureHandler": {
+                                  "type": "StaticResponseHandler",
+                                  "config": { "status": 405, "reason": "Method Not Allowed" }
+                              }
+                          }
+                      },
+                      {
+                          "comment": "CONTROL B - survives Harness (matches() is not a JEXL function)",
+                          "type": "ConditionEnforcementFilter",
+                          "config": {
+                              "condition": "${matches(request.headers['Authorization'][0], '^Bearer (.*)')}",
+                              "failureHandler": {
+                                  "type": "StaticResponseHandler",
+                                  "config": { "status": 401, "reason": "Unauthorized" }
+                              }
+                          }
+                      },
+                      {
+                          "comment": "FIXED form - survives Harness AND is valid ForgeRock IG EL",
+                          "type": "ConditionEnforcementFilter",
+                          "config": {
+                              "condition": "${request.headers['client_id'][0] != null && request.headers['client_id'][0] != ''}",
+                              "failureHandler": {
+                                  "type": "StaticResponseHandler",
+                                  "config": { "status": 400, "reason": "Missing Client ID (fixed)" }
+                              }
+                          }
+                      }
+                  ],
+                  "handler": "ReverseProxyHandler"
+              }
+          },
+          "condition": "${request.uri.path == '/repro'}"
+      }

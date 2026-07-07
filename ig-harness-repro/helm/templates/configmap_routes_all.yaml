@@ -1,0 +1,14 @@
+{{- range $partition, $filenames := .Values.routes }}
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "helm.prefix" $ }}-configmap-{{ $partition }}
+  labels:
+    {{- include "helm.labels" $ | nindent 4 }}
+data:
+  {{- range $filename, $content := $filenames }}
+  {{ $filename }}: |-
+    {{- $content | nindent 4 }}
+  {{- end }}
+{{- end }}

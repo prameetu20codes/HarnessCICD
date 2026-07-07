@@ -1,0 +1,28 @@
+service:
+  name: ig-routes-repro
+  identifier: ig_routes_repro
+  # NOTE: Kubernetes deployment type is intentional. Harness runs `helm template`
+  # and then applies its OWN JEXL expression rendering on the output - that step
+  # is what rewrites ${not empty ...} to false. (Native Helm type renders
+  # differently; use Kubernetes type to reproduce.)
+  serviceDefinition:
+    type: Kubernetes
+    spec:
+      manifests:
+        - manifest:
+            identifier: ig_routes_chart
+            type: HelmChart
+            spec:
+              store:
+                type: Git
+                spec:
+                  connectorRef: <+input>   # your Git connector to this repo
+                  gitFetchType: Branch
+                  branch: main
+                  folderPath: ig-harness-repro/helm
+              chartName: ig-routes
+              helmVersion: V3
+              skipResourceVersioning: false
+              valuesPaths:
+                - ig-harness-repro/helm/values.yaml
+  gitOpsEnabled: false
