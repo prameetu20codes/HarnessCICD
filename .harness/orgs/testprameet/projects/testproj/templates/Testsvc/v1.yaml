@@ -1,0 +1,50 @@
+template:
+  name: Test-svc
+  identifier: Testsvc
+  versionLabel: v1
+  type: Pipeline
+  projectIdentifier: testproj
+  orgIdentifier: testprameet
+  tags: {}
+  spec:
+    stages:
+      - stage:
+          name: test-stage
+          identifier: teststage
+          description: ""
+          type: Deployment
+          spec:
+            deploymentType: Kubernetes
+            environment:
+              environmentRef: <+input>
+              deployToAll: false
+              environmentInputs: <+input>
+              serviceOverrideInputs: <+input>
+              infrastructureDefinitions: <+input>
+            service:
+              serviceRef: <+input>
+              serviceInputs: <+input>
+            execution:
+              steps:
+                - step:
+                    type: ShellScript
+                    name: ShellScript_1
+                    identifier: ShellScript_1
+                    spec:
+                      shell: Bash
+                      executionTarget: {}
+                      source:
+                        type: Inline
+                        spec:
+                          script: echo "shell"
+                      environmentVariables: []
+                      outputVariables: []
+                    timeout: 10m
+              rollbackSteps: []
+          tags: {}
+          failureStrategies:
+            - onFailure:
+                errors:
+                  - AllErrors
+                action:
+                  type: StageRollback
