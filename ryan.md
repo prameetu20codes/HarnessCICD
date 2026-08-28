@@ -279,6 +279,63 @@ Governance operates at two levels here:
   YAML on create/update, so template reuse and policy compliance are checked as pipelines
   themselves change.
 
+### 5.1 Release-pipeline shape policies (Rego)
+
+Beyond the mandate gates, the onsite produced **three Rego policies that enforce the
+*shape* of any `release-*` pipeline** — i.e. they guarantee that release pipelines are
+built the right way *before* they are ever allowed to save or run. All three key off the
+same convention: a pipeline is a "release" pipeline when its `name` **or** `identifier`
+starts with `release-`. They differ in *what* they enforce and *when* they fire.
+
+```mermaid
+flowchart TD
+    SAVE["On Save"] --> P2["Policy 2 · Signoff Tests\nmust wire a Trigger tests step group"]
+    RUN["On Run"] --> P1["Policy 1 · Perf Tests\nrequired when DEPLOY_TO_PERF=true"]
+    RUN --> P3["Policy 3 · Required templates\nmust reference Release / org.Release"]
+
+    P1 --> V{"pass?"}
+    P2 --> V
+    P3 --> V
+    V -->|yes| GO["Save / run proceeds"]
+    V -->|no| DENY["deny[msg] — blocked with reason"]
+```
+
+| # | Policy | Event | What it guarantees | Deny reason(s) |
+|---|--------|-------|--------------------|----------------|
+| 1 | **Perf test enforcement** | `onrun` | When the `DEPLOY_TO_PERF` variable **resolves to `true`**, the release pipeline must have a `Perf Test(s)` Custom stage that contains a step group referencing **Trigger Github Tests** or **Trigger Jenkins Tests** | (A) `DEPLOY_TO_PERF=true` but no Perf Test stage at all; (B) Perf stage exists but has no trigger-tests step group |
+| 2 | **Signoff tests enforcement** | `onsave` | Every release pipeline's `Signoff Tests` Custom stage must contain a step group referencing **Trigger Github Tests** or **Trigger Jenkins Tests** | Signoff Tests stage present but missing the trigger-tests step group |
+| 3 | **Required templates** | `onrun` | Every release pipeline must reference the required templates `["Release", "org.Release"]` somewhere in its tree | Pipeline is a release pipeline but does not reference a required template |
+
+**Why the design is robust (worth calling out to leadership):**
+
+- **Save-time vs run-time split.** Policy 2 fires **on save** — the structural rule that
+  every release must run its signoff tests is checked the moment the author writes the
+  pipeline, so bad structure never reaches Git. Policies 1 and 3 fire **on run**, because
+  they depend on *resolved* runtime values (`DEPLOY_TO_PERF`'s actual value, and the fully
+  expanded template tree). This is exactly the right use of Harness's On Save / On Run
+  policy hooks.
+- **Conditional enforcement.** Policy 1 only demands a Perf Test stage *when performance
+  deployment is actually turned on* (`DEPLOY_TO_PERF=true`) — it never blocks a release
+  that legitimately skips perf. The truthiness check is normalised (`is_true` lower-cases
+  and stringifies), so `"true"`, `true`, and `TRUE` are all handled.
+- **Deep, layout-agnostic matching.** All three use Rego `walk()` to search the *entire*
+  execution tree — sequential stages, `parallel` blocks, step groups, and `insert` nodes
+  alike — so a required step group is found no matter how the author nested it. Stage
+  names are matched case-insensitively.
+- **Scope-agnostic template matching.** The `templateRef` regexes match by **suffix**, so
+  `Trigger Github Tests` is recognised whether it is referenced as `account.…`, `org.…`,
+  or `project.…` scoped. The name regexes also tolerate spacing/underscore variants
+  (`trigger[_ ]*git[ ]*hub[_ ]*tests$`).
+- **Actionable failures.** Each rule emits a `deny[msg]` with the offending stage and
+  pipeline name, so the author sees *exactly* what to fix rather than a generic block.
+
+**VISA benefit:** these three policies make the "golden" release shape **non-optional**.
+A `release-*` pipeline physically cannot save without its signoff tests wired, cannot run
+without the approved `Release` template, and cannot run a perf deployment without proving
+its perf tests exist. Combined with the mandate gates in §4, VISA gets *structural*
+governance (is the pipeline built correctly?) on top of *evidentiary* governance (does the
+change meet the 10 mandates?).
+
 **Recommended hardening** (natural next steps, consistent with the earlier golden-pipeline
 review):
 
