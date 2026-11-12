@@ -126,11 +126,15 @@ pipeline:
 
                       # ---------------------------------------------------------------- Harness API
                       # hx METHOD PATH SCOPE [CONTENT_TYPE BODY_FILE]; extra query string in $Q; sets $STATUS, body in $TMP/resp
+                      # SCOPE is account, org or project (scope query parameters added) or v1 (path carries the scope).
                       hx() {
-                        _qs="accountIdentifier=$HARNESS_ACCOUNT_ID"
-                        [ "$3" != account ] && _qs="$_qs&orgIdentifier=$ORG_ID"
-                        [ "$3" = project ] && _qs="$_qs&projectIdentifier=$PROJECT_ID"
-                        [ -n "${Q:-}" ] && _qs="$_qs&$Q"
+                        _qs=""
+                        if [ "$3" != v1 ]; then
+                          _qs="accountIdentifier=$HARNESS_ACCOUNT_ID"
+                          [ "$3" != account ] && _qs="$_qs&orgIdentifier=$ORG_ID"
+                          [ "$3" = project ] && _qs="$_qs&projectIdentifier=$PROJECT_ID"
+                        fi
+                        [ -n "${Q:-}" ] && _qs="${_qs:+$_qs&}$Q"
                         if [ -n "${5:-}" ]; then
                           STATUS=$(curl -sS -o "$TMP/resp" -w '%{http_code}' -X "$1" -H "x-api-key: $HARNESS_API_KEY" \
                             -H "Harness-Account: $HARNESS_ACCOUNT_ID" -H "Accept: application/json" -H "Content-Type: $4" \
@@ -531,25 +535,28 @@ pipeline:
                         load_settings
                         echo "== REGISTER $REQUEST_KEY from $GITX_REPO@$GITX_BRANCH"
                         _imp="connectorRef=$(urlenc "$GITX_CONNECTOR")&repoName=$(urlenc "$GITX_REPO")&branch=$(urlenc "$GITX_BRANCH")&isForceImport=false"
+                        _v1="/v1/orgs/$ORG_ID/projects/$PROJECT_ID"
                         printf '%s\n' "$ONBOARD_FILES" > "$TMP/files"
                         while IFS='|' read -r _kind _id _path; do
                           [ -n "$_kind" ] || continue
                           if [ ! -f "$REPO_DIR/$_path" ]; then err "$_path is not on $GITX_BRANCH; was the PR merged?"; continue; fi
                           if entity_exists "$_kind" "$_id"; then row "$_kind" "$_id" "exists in Harness, left unchanged" "$_path"; continue; fi
-                          _fp="filePath=$(urlenc "$_path")"
+                          _git=$(printf '{"connector_ref":"%s","repo_name":"%s","branch_name":"%s","file_path":"%s","is_force_import":false}' \
+                            "$GITX_CONNECTOR" "$GITX_REPO" "$GITX_BRANCH" "$_path")
                           case "$_kind" in
                             service)
-                              printf '{"serviceName":"%s","serviceDescription":""}' "$(json_escape "$APP_NAME")" > "$TMP/body"
-                              Q="$_imp&$_fp&serviceIdentifier=$_id"; hx POST /ng/api/servicesV2/import project application/json "$TMP/body" ;;
+                              Q="$_imp&filePath=$(urlenc "$_path")&serviceIdentifier=$_id"; hx POST /ng/api/servicesV2/import project ;;
                             pipeline)
-                              printf '{"pipelineName":"%s","pipelineDescription":""}' "$(json_escape "$APP_NAME $BLUEPRINT")" > "$TMP/body"
-                              Q="$_imp&$_fp&pipelineIdentifier=$_id"; hx POST /pipeline/api/pipelines/import project application/json "$TMP/body" ;;
+                              printf '{"git_import_info":%s,"pipeline_import_request":{"pipeline_name":"%s","pipeline_description":""}}' \
+                                "$_git" "$(json_escape "$APP_NAME $BLUEPRINT")" > "$TMP/body"
+                              hx POST "$_v1/pipelines/$_id/import" v1 application/json "$TMP/body" ;;
                             inputset)
-                              printf '{"inputSetName":"%s","inputSetDescription":""}' "$_id" > "$TMP/body"
-                              Q="$_imp&$_fp&pipelineIdentifier=$PIPELINE_ID&inputSetIdentifier=$_id"
-                              hx POST /pipeline/api/inputSets/import project application/json "$TMP/body" ;;
+                              printf '{"git_import_info":%s,"input_set_import_request":{"input_set_name":"%s","input_set_description":""}}' \
+                                "$_git" "$_id" > "$TMP/body"
+                              Q="pipeline=$PIPELINE_ID"; hx POST "$_v1/input-sets/$_id/import" v1 application/json "$TMP/body" ;;
                             trigger)
-                              Q="targetIdentifier=$PIPELINE_ID"; hx POST /pipeline/api/triggers project application/yaml "$REPO_DIR/$_path" ;;
+                              Q="targetIdentifier=$PIPELINE_ID&withServiceV2=true"
+                              hx POST /pipeline/api/triggers project application/yaml "$REPO_DIR/$_path" ;;
                           esac
                           case "$STATUS" in
                             2??) [ "$_kind" = trigger ] && row "$_kind" "$_id" created "$_path" || row "$_kind" "$_id" imported "$_path" ;;
