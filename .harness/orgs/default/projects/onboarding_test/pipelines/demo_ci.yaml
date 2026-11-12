@@ -1,0 +1,110 @@
+pipeline:
+  name: demo-ci
+  identifier: demo_ci
+  orgIdentifier: default
+  projectIdentifier: onboarding_test
+  tags: {}
+  template:
+    templateRef: pipeline_cco_vm_deployment
+    versionLabel: v8
+    gitBranch: main
+    templateInputs:
+      stages:
+        - stage:
+            identifier: Feature_Branch_Deployment
+            template:
+              templateInputs:
+                type: Deployment
+                variables:
+                  - name: version
+                    type: String
+                    value: <+input>
+                  - name: serviceRef
+                    type: String
+                    value: <+input>
+                  - name: environmentRef
+                    type: String
+                    value: <+input>
+                  - name: infrastructureDefinitionsRef
+                    type: String
+                    value: <+input>
+        - stage:
+            identifier: Pull_Request_Creation
+            template:
+              templateInputs:
+                type: Custom
+                variables:
+                  - name: version
+                    type: String
+                    value: <+input>
+                  - name: targetbranchname
+                    type: String
+                    value: <+input>
+        - stage:
+            identifier: Gather_build_info
+            template:
+              templateInputs:
+                type: Custom
+                variables:
+                  - name: artifact_name
+                    type: String
+                    value: <+input>
+        - stage:
+            identifier: Develop_Lane_Deployment
+            template:
+              templateInputs:
+                type: Deployment
+                variables:
+                  - name: version
+                    type: String
+                    value: <+input>
+                  - name: serviceRef
+                    type: String
+                    value: <+input>
+                  - name: environmentRef
+                    type: String
+                    value: <+input>
+                  - name: infrastructureDefinitionsRef
+                    type: String
+                    value: <+input>
+        - stage:
+            identifier: Release_Creation
+            template:
+              templateInputs:
+                type: Custom
+                spec:
+                  execution:
+                    steps:
+                      - stepGroup:
+                          identifier: release_cut
+                          stepGroupInfra:
+                            type: KubernetesDirect
+                            spec:
+                              namespace: <+input>
+        - stage:
+            identifier: Release_Artifact_Creation
+            template:
+              templateInputs:
+                type: Custom
+                spec:
+                  execution:
+                    steps:
+                      - stepGroup:
+                          identifier: trigger_release_build_group
+                          stepGroupInfra:
+                            type: KubernetesDirect
+                            spec:
+                              namespace: <+input>
+      variables:
+        - name: flagundeploy
+          type: String
+          value: <+input>.default(true).selectOneFrom(true,false)
+        - name: reponame
+          type: String
+          value: <+input>
+        - name: appname
+          type: String
+          value: <+input>
+        - name: cd_pipeline
+          type: String
+          value: <+input>
