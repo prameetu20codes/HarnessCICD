@@ -3,3 +3,4 @@ gradle-*-bin.zip
 .gradle/
 build/
 local.properties
+__pycache__/
