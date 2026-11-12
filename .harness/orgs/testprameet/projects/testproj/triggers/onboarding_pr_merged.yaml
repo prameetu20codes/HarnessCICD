@@ -1,0 +1,38 @@
+trigger:
+  name: Onboarding PR merged
+  identifier: onboarding_pr_merged
+  enabled: true
+  description: Registers an app team's onboarding request when its PR into main is merged.
+  orgIdentifier: testprameet
+  projectIdentifier: testproj
+  pipelineIdentifier: app_team_onboarding_register
+  pipelineBranchName: main
+  tags: {}
+  source:
+    type: Webhook
+    spec:
+      type: Github
+      spec:
+        type: PullRequest
+        spec:
+          connectorRef: harnesstesting
+          autoAbortPreviousExecutions: false
+          repoName: HarnessCICD
+          payloadConditions:
+            - key: sourceBranch
+              operator: StartsWith
+              value: onboarding/
+            - key: targetBranch
+              operator: Equals
+              value: main
+          headerConditions: []
+          jexlCondition: <+trigger.payload.pull_request.merged> == true
+          actions:
+            - Close
+  inputYaml: |
+    pipeline:
+      identifier: app_team_onboarding_register
+      variables:
+        - name: request
+          type: String
+          value: <+trigger.sourceBranch>

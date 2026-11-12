@@ -1,0 +1,227 @@
+pipeline:
+  name: App Team Onboarding
+  identifier: app_team_onboarding
+  projectIdentifier: testproj
+  orgIdentifier: testprameet
+  description: |-
+    Self-service onboarding for an app team, step 1 of 2. Renders a Service, a Pipeline that
+    references an approved pipeline template, one Input Set per environment and a GitHub push
+    Trigger. Plan is read-only. With dry_run=false, Propose commits the files to branch
+    onboarding/<org>/<project>/<app> and opens a PR; merging it runs app_team_onboarding_register.
+  tags: {}
+  stages:
+    - stage:
+        name: onboarding
+        identifier: onboarding
+        description: ""
+        type: CI
+        spec:
+          cloneCodebase: true
+          caching:
+            enabled: false
+            override: false
+            paths: []
+          buildIntelligence:
+            enabled: false
+          platform:
+            os: Windows
+            arch: Amd64
+          runtime:
+            type: Docker
+            spec: {}
+          execution:
+            steps:
+              - step:
+                  type: Run
+                  name: Validate and plan
+                  identifier: validate_and_plan
+                  spec:
+                    shell: Sh
+                    envVariables:
+                      HARNESS_BASE_URL: <+pipeline.variables.harness_base_url>
+                      HARNESS_ACCOUNT_ID: <+account.identifier>
+                      HARNESS_API_KEY: <+pipeline.variables.harness_api_key>
+                      ORG_ID: <+pipeline.variables.org_id>
+                      PROJECT_ID: <+pipeline.variables.project_id>
+                      APP_NAME: <+pipeline.variables.app_name>
+                      OWNER_EMAIL: <+pipeline.triggeredBy.email>
+                      TEMPLATE_REF: <+pipeline.variables.template_ref>
+                      TEMPLATE_VERSION: <+pipeline.variables.template_version>
+                      DEPLOYMENT_TYPE: <+pipeline.variables.deployment_type>
+                      APP_REPO: <+pipeline.variables.app_repo>
+                      APP_GIT_CONNECTOR: <+pipeline.variables.app_git_connector>
+                      MANIFEST_PATH: <+pipeline.variables.manifest_path>
+                      REGISTRY_CONNECTOR: <+pipeline.variables.registry_connector>
+                      IMAGE_PATH: <+pipeline.variables.image_path>
+                      ENVIRONMENTS: <+pipeline.variables.environments>
+                      INPUT_OVERRIDES: <+pipeline.variables.input_overrides>
+                      CREATE_TRIGGER: <+pipeline.variables.create_trigger>
+                      TRIGGER_BRANCH: <+pipeline.variables.trigger_branch>
+                      GITX_CONNECTOR: <+pipeline.variables.gitx_connector>
+                      GITX_REPO: <+pipeline.variables.gitx_repo>
+                      GITX_BRANCH: <+pipeline.variables.gitx_branch>
+                      REPORT_PATH: onboarding-report.json
+                    command: |-
+                      PY=$(command -v python3 || command -v python)
+                      "$PY" onboarding/onboard.py plan
+              - step:
+                  type: Run
+                  name: Open onboarding PR
+                  identifier: open_pr
+                  when:
+                    stageStatus: Success
+                    condition: <+pipeline.variables.dry_run> == "false"
+                  spec:
+                    shell: Sh
+                    envVariables:
+                      HARNESS_BASE_URL: <+pipeline.variables.harness_base_url>
+                      HARNESS_ACCOUNT_ID: <+account.identifier>
+                      HARNESS_API_KEY: <+pipeline.variables.harness_api_key>
+                      ORG_ID: <+pipeline.variables.org_id>
+                      PROJECT_ID: <+pipeline.variables.project_id>
+                      APP_NAME: <+pipeline.variables.app_name>
+                      OWNER_EMAIL: <+pipeline.triggeredBy.email>
+                      TEMPLATE_REF: <+pipeline.variables.template_ref>
+                      TEMPLATE_VERSION: <+pipeline.variables.template_version>
+                      DEPLOYMENT_TYPE: <+pipeline.variables.deployment_type>
+                      APP_REPO: <+pipeline.variables.app_repo>
+                      APP_GIT_CONNECTOR: <+pipeline.variables.app_git_connector>
+                      MANIFEST_PATH: <+pipeline.variables.manifest_path>
+                      REGISTRY_CONNECTOR: <+pipeline.variables.registry_connector>
+                      IMAGE_PATH: <+pipeline.variables.image_path>
+                      ENVIRONMENTS: <+pipeline.variables.environments>
+                      INPUT_OVERRIDES: <+pipeline.variables.input_overrides>
+                      CREATE_TRIGGER: <+pipeline.variables.create_trigger>
+                      TRIGGER_BRANCH: <+pipeline.variables.trigger_branch>
+                      GITX_CONNECTOR: <+pipeline.variables.gitx_connector>
+                      GITX_REPO: <+pipeline.variables.gitx_repo>
+                      GITX_BRANCH: <+pipeline.variables.gitx_branch>
+                      GITHUB_TOKEN: <+pipeline.variables.github_token>
+                      GITHUB_OWNER: <+pipeline.variables.github_owner>
+                      GITHUB_API_URL: <+pipeline.variables.github_api_url>
+                      REPORT_PATH: onboarding-report.json
+                    command: |-
+                      PY=$(command -v python3 || command -v python)
+                      "$PY" onboarding/onboard.py propose
+        variables:
+          - name: HARNESS_CI_INTERNAL_ROUTE_TO_RUNNER
+            type: String
+            description: ""
+            required: false
+            value: "true"
+          - name: HARNESS_CI_INTERNAL_CONTAINERLESS
+            type: String
+            description: ""
+            required: false
+            value: "true"
+        delegateSelectors:
+          - linux-delegate
+  properties:
+    ci:
+      codebase:
+        connectorRef: harnesstesting
+        repoName: HarnessCICD
+        build: <+input>
+        sparseCheckout: []
+  variables:
+    - name: project_id
+      type: String
+      description: Existing Harness project to onboard into. The project must exist before onboarding.
+      required: true
+      value: <+input>.default(testproj)
+    - name: app_name
+      type: String
+      description: Application / service name. The service id, pipeline id and input set ids are derived from it.
+      required: true
+      value: <+input>.regex(^[a-zA-Z][a-zA-Z0-9 _-]{1,60}$)
+    - name: template_ref
+      type: String
+      description: Approved pipeline template (blueprint) the new pipeline references, with scope prefix, e.g. org.golden_k8s_pipeline.
+      required: true
+      value: <+input>
+    - name: template_version
+      type: String
+      description: Immutable versionLabel of the blueprint, e.g. v1.0.0.
+      required: true
+      value: <+input>
+    - name: deployment_type
+      type: String
+      description: Kubernetes for containers, Ssh for VMs.
+      required: true
+      value: <+input>.allowedValues(Kubernetes,Ssh)
+    - name: app_repo
+      type: String
+      description: Your application repo name in the GitHub org.
+      required: true
+      value: <+input>
+    - name: manifest_path
+      type: String
+      description: Path to Kubernetes manifests in the app repo (Kubernetes only).
+      required: false
+      value: <+input>.default(k8s/)
+    - name: image_path
+      type: String
+      description: Image path (Kubernetes) or Artifactory repository (Ssh).
+      required: true
+      value: <+input>
+    - name: environments
+      type: String
+      description: Comma-separated environments, one input set each, e.g. dev,prod. Unprefixed ids are org-scoped.
+      required: true
+      value: <+input>.default(dev)
+    - name: input_overrides
+      type: String
+      description: Optional key=value pairs (comma-separated) that fill matching <+input> fields in the generated input sets.
+      required: false
+      value: <+input>.default("")
+    - name: create_trigger
+      type: String
+      required: true
+      value: <+input>.default(true).allowedValues(true,false)
+    - name: trigger_branch
+      type: String
+      description: App repo branch whose pushes trigger the pipeline (uses the first environment's input set).
+      required: true
+      value: <+input>.default(main)
+    - name: dry_run
+      type: String
+      description: true = plan only, nothing written. false = plan, then push the branch and open the PR.
+      required: true
+      value: <+input>.default(true).allowedValues(true,false)
+    - name: org_id
+      type: String
+      value: testprameet
+    - name: app_git_connector
+      type: String
+      value: harnesstesting
+    - name: registry_connector
+      type: String
+      value: account.harnessImage
+    - name: gitx_connector
+      type: String
+      description: Connector the onboarded entities are imported through.
+      value: harnesstesting
+    - name: gitx_repo
+      type: String
+      value: HarnessCICD
+    - name: gitx_branch
+      type: String
+      value: main
+    - name: github_owner
+      type: String
+      description: GitHub org or user that owns the GitX repo.
+      value: prameetu20codes
+    - name: github_api_url
+      type: String
+      value: https://api.github.com
+    - name: harness_base_url
+      type: String
+      value: https://app.harness.io/gateway
+    - name: harness_api_key
+      type: Secret
+      description: Harness API key. This pipeline only reads with it; app_team_onboarding_register needs create rights.
+      value: harness_api_key
+    - name: github_token
+      type: Secret
+      description: GitHub token with contents and pull-request write on the GitX repo.
+      value: github_pat

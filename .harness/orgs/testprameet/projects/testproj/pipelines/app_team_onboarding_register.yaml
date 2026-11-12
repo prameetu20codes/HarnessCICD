@@ -1,0 +1,85 @@
+pipeline:
+  name: App Team Onboarding Register
+  identifier: app_team_onboarding_register
+  projectIdentifier: testproj
+  orgIdentifier: testprameet
+  description: |-
+    Self-service onboarding, step 2 of 2. Runs when an onboarding PR (branch
+    onboarding/<org>/<project>/<app>) is merged into main. Reads the request manifest
+    onboarding/requests/<org>/<project>/<app>.json, imports the service, pipeline and input sets
+    from their merged files as remote entities, then creates the trigger from its merged file.
+    Entities that already exist are left unchanged, so a re-run only fills gaps.
+  tags: {}
+  stages:
+    - stage:
+        name: register
+        identifier: register
+        description: ""
+        type: CI
+        spec:
+          cloneCodebase: true
+          caching:
+            enabled: false
+            override: false
+            paths: []
+          buildIntelligence:
+            enabled: false
+          platform:
+            os: Windows
+            arch: Amd64
+          runtime:
+            type: Docker
+            spec: {}
+          execution:
+            steps:
+              - step:
+                  type: Run
+                  name: Import entities and create trigger
+                  identifier: import_entities
+                  spec:
+                    shell: Sh
+                    envVariables:
+                      HARNESS_BASE_URL: <+pipeline.variables.harness_base_url>
+                      HARNESS_ACCOUNT_ID: <+account.identifier>
+                      HARNESS_API_KEY: <+pipeline.variables.harness_api_key>
+                      REQUEST: <+pipeline.variables.request>
+                      REPORT_PATH: onboarding-report.json
+                    command: |-
+                      PY=$(command -v python3 || command -v python)
+                      REPO_DIR="$PWD" "$PY" onboarding/onboard.py register
+        variables:
+          - name: HARNESS_CI_INTERNAL_ROUTE_TO_RUNNER
+            type: String
+            description: ""
+            required: false
+            value: "true"
+          - name: HARNESS_CI_INTERNAL_CONTAINERLESS
+            type: String
+            description: ""
+            required: false
+            value: "true"
+        delegateSelectors:
+          - linux-delegate
+  properties:
+    ci:
+      codebase:
+        connectorRef: harnesstesting
+        repoName: HarnessCICD
+        build:
+          type: branch
+          spec:
+            branch: main
+        sparseCheckout: []
+  variables:
+    - name: request
+      type: String
+      description: "<org>/<project>/<app_id>, or the PR branch onboarding/<org>/<project>/<app_id>."
+      required: true
+      value: <+input>.regex(^(onboarding/)?[A-Za-z_][A-Za-z0-9_]*/[A-Za-z_][A-Za-z0-9_]*/[a-z_][a-z0-9_]*$)
+    - name: harness_base_url
+      type: String
+      value: https://app.harness.io/gateway
+    - name: harness_api_key
+      type: Secret
+      description: Harness API key with create rights on services, pipelines, input sets and triggers.
+      value: harness_api_key
