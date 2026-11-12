@@ -1,0 +1,39 @@
+service:
+  name: demo_svc
+  identifier: demo_svc
+  orgIdentifier: default
+  projectIdentifier: onboarding_test
+  serviceDefinition:
+    type: Kubernetes
+    spec:
+      manifests:
+        - manifest:
+            identifier: helm_chart
+            type: HelmChart
+            spec:
+              store:
+                type: Github
+                spec:
+                  connectorRef: account.prameetgit
+                  gitFetchType: Branch
+                  repoName: HarnessCICD
+                  branch: main
+                  folderPath: charts/demo
+              subChartPath: ""
+              valuesPaths:
+                - charts/demo/values.yaml
+              skipResourceVersioning: false
+              enableDeclarativeRollback: false
+              helmVersion: V3
+              fetchHelmChartMetadata: false
+      artifacts:
+        primary:
+          primaryArtifactRef: image
+          sources:
+            - identifier: image
+              type: DockerRegistry
+              spec:
+                connectorRef: account.harnessImage
+                imagePath: library/nginx
+                tag: <+stage.variables.version>
+                digest: ""
