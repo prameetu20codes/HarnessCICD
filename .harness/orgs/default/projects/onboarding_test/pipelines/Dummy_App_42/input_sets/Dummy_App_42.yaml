@@ -1,0 +1,81 @@
+inputSet:
+  name: Dummy App 42
+  tags: {}
+  identifier: Dummy_App_42
+  orgIdentifier: default
+  projectIdentifier: onboarding_test
+  pipeline:
+    identifier: Dummy_App_42
+    template:
+      templateInputs:
+        stages:
+          - stage:
+              identifier: Feature_Branch_Deployment
+              template:
+                templateInputs:
+                  type: Deployment
+                  variables:
+                    - name: version
+                      type: String
+                      value: <+trigger.artifact.build>
+                    - name: serviceRef
+                      type: String
+                      value: dummy_svc_42
+                    - name: environmentRef
+                      type: String
+                      value: dev
+                    - name: infrastructureDefinitionsRef
+                      type: String
+                      value: Atlantik
+          - stage:
+              identifier: Pull_Request_Creation
+              template:
+                templateInputs:
+                  type: Custom
+                  variables:
+                    - name: version
+                      type: String
+                      value: <+trigger.artifact.build>
+                    - name: targetbranchname
+                      type: String
+                      value: develop
+          - stage:
+              identifier: Gather_build_info
+              template:
+                templateInputs:
+                  type: Custom
+                  variables:
+                    - name: artifact_name
+                      type: String
+                      value: build_version_info
+          - stage:
+              identifier: Develop_Lane_Deployment
+              template:
+                templateInputs:
+                  type: Deployment
+                  variables:
+                    - name: version
+                      type: String
+                      value: <+pipeline.stages.Gather_build_info.spec.execution.steps.develop_gate.steps.Parse_develop_version.output.outputVariables.RELEASE_VERSION>
+                    - name: serviceRef
+                      type: String
+                      value: dummy_svc_42
+                    - name: environmentRef
+                      type: String
+                      value: dev
+                    - name: infrastructureDefinitionsRef
+                      type: String
+                      value: Atlantik
+        variables:
+          - name: flagundeploy
+            type: String
+            value: "true"
+          - name: reponame
+            type: String
+            value: dummy-app-42-repo
+          - name: appname
+            type: String
+            value: dummy-app-42
+          - name: cd_pipeline
+            type: String
+            value: dummy42cd
