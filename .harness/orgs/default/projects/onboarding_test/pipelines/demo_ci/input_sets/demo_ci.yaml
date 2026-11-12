@@ -1,0 +1,81 @@
+inputSet:
+  name: demo-ci
+  tags: {}
+  identifier: demo_ci
+  orgIdentifier: default
+  projectIdentifier: onboarding_test
+  pipeline:
+    identifier: demo_ci
+    template:
+      templateInputs:
+        stages:
+          - stage:
+              identifier: Feature_Branch_Deployment
+              template:
+                templateInputs:
+                  type: Deployment
+                  variables:
+                    - name: version
+                      type: String
+                      value: <+trigger.artifact.build>
+                    - name: serviceRef
+                      type: String
+                      value: demo_svc
+                    - name: environmentRef
+                      type: String
+                      value: dev
+                    - name: infrastructureDefinitionsRef
+                      type: String
+                      value: Atlantik
+          - stage:
+              identifier: Pull_Request_Creation
+              template:
+                templateInputs:
+                  type: Custom
+                  variables:
+                    - name: version
+                      type: String
+                      value: <+trigger.artifact.build>
+                    - name: targetbranchname
+                      type: String
+                      value: develop
+          - stage:
+              identifier: Gather_build_info
+              template:
+                templateInputs:
+                  type: Custom
+                  variables:
+                    - name: artifact_name
+                      type: String
+                      value: build_version_info
+          - stage:
+              identifier: Develop_Lane_Deployment
+              template:
+                templateInputs:
+                  type: Deployment
+                  variables:
+                    - name: version
+                      type: String
+                      value: <+pipeline.stages.Gather_build_info.spec.execution.steps.develop_gate.steps.Parse_develop_version.output.outputVariables.RELEASE_VERSION>
+                    - name: serviceRef
+                      type: String
+                      value: demo_svc
+                    - name: environmentRef
+                      type: String
+                      value: dev
+                    - name: infrastructureDefinitionsRef
+                      type: String
+                      value: Atlantik
+        variables:
+          - name: flagundeploy
+            type: String
+            value: "true"
+          - name: reponame
+            type: String
+            value: demo-repo
+          - name: appname
+            type: String
+            value: demo-app
+          - name: cd_pipeline
+            type: String
+            value: democd
