@@ -36,17 +36,519 @@ pipeline:
                   type: Run
                   name: Import entities and create trigger
                   identifier: import_entities
+                  timeout: 30m
                   spec:
                     shell: Sh
                     envVariables:
                       HARNESS_BASE_URL: <+pipeline.variables.harness_base_url>
                       HARNESS_ACCOUNT_ID: <+account.identifier>
                       HARNESS_API_KEY: <+pipeline.variables.harness_api_key>
+                      MODE: register
                       REQUEST: <+pipeline.variables.request>
-                      REPORT_PATH: onboarding-report.json
                     command: |-
-                      PY=$(command -v python3 || command -v python)
-                      REPO_DIR="$PWD" "$PY" onboarding/onboard.py register
+                      #!/bin/sh
+                      # App-team onboarding engine. POSIX sh + curl, sed, awk, grep, base64 (no Python, no jq).
+                      #   MODE=plan      read-only: validate inputs, render YAML, report what would be proposed
+                      #   MODE=propose   plan, then commit the YAML to branch onboarding/<org>/<project>/<app> and open a PR
+                      #   MODE=register  after the PR merged: import the merged files into Harness, create the trigger
+                      # MODE defaults to propose when DRY_RUN=false, else plan.
+                      # This script is embedded in Run steps, where Harness resolves expressions before the shell
+                      # runs, so it never spells the expression opener literally: it is built at runtime in $LT.
+                      # In INPUT_OVERRIDES, write runtime expressions as @{expr}; they become the expression form.
+
+                      set -u
+                      LT='<''+'
+                      RI="${LT}input>"
+                      TMP=$(mktemp -d 2>/dev/null || echo "${TMPDIR:-/tmp}/onboard.$$")
+                      mkdir -p "$TMP"
+                      ERRORS=0
+
+                      die() { echo "ERROR: $*" >&2; exit 2; }
+                      err() { echo "  ERROR: $*" >&2; ERRORS=$((ERRORS + 1)); }
+                      warn() { echo "  WARN: $*"; }
+                      row() { printf '  %-10s %-48s %s%s\n' "$1" "$2" "$3" "${4:+  ($4)}"; }
+                      need() { eval "_v=\${$1:-}"; [ -n "$_v" ] || die "missing required setting $1"; }
+
+                      to_id() {
+                        _s=$(printf '%s' "$1" | tr -c 'A-Za-z0-9_' '_' | sed 's/^_*//; s/_*$//' | tr 'A-Z' 'a-z')
+                        case "$_s" in [0-9]*) _s="_$_s" ;; esac
+                        printf '%s' "$_s" | grep -Eq '^[a-zA-Z_][0-9a-zA-Z_]{0,127}$' || die "cannot derive an identifier from '$1'"
+                        printf '%s' "$_s" | cut -c1-128
+                      }
+                      scope_of() { case "$1" in org.*) echo org ;; account.*) echo account ;; *) echo project ;; esac; }
+                      id_of() { case "$1" in org.*) echo "${1#org.}" ;; account.*) echo "${1#account.}" ;; *) echo "$1" ;; esac; }
+                      env_ref() { case "$1" in *.*) echo "$1" ;; *) echo "org.$1" ;; esac; }
+                      urlenc() { printf '%s' "$1" | sed 's/%/%25/g; s/ /%20/g; s/+/%2B/g; s/&/%26/g; s/#/%23/g; s/?/%3F/g'; }
+                      indent() { sed "s/^/$(printf "%${1}s" '')/" "$2"; }
+                      json_escape() { printf '%s' "$1" | sed 's/\\/\\\\/g; s/"/\\"/g' | awk 'BEGIN { ORS = "" } NR > 1 { print "\\n" } { print }'; }
+                      sq() { printf "'%s'" "$(printf '%s' "$1" | sed "s/'/'\\\\''/g")"; }
+
+                      # First "key":"..." string value of a JSON file, unescaped.
+                      json_str() {
+                        awk -v key="$1" 'BEGIN { RS = "\001" } {
+                          if (!match($0, "\"" key "\"[ \t]*:[ \t]*\"")) exit
+                          s = substr($0, RSTART + RLENGTH); out = ""
+                          for (i = 1; i <= length(s); i++) {
+                            c = substr(s, i, 1)
+                            if (c == "\"") break
+                            if (c == "\\") {
+                              i++; c = substr(s, i, 1)
+                              if (c == "n") c = "\n"; else if (c == "t") c = "\t"; else if (c == "r") c = ""
+                              else if (c == "u") { h = substr(s, i + 1, 4); i += 4; c = (h ~ /^00[0-7]/) ? sprintf("%c", hex(h)) : "?" }
+                            }
+                            out = out c
+                          }
+                          printf "%s", out
+                        }
+                        function hex(h,   n, k) { n = 0; for (k = 1; k <= 4; k++) n = n * 16 + index("0123456789abcdef", tolower(substr(h, k, 1))) - 1; return n }' "$2"
+                      }
+                      json_msg() { grep -o '"message" *: *"[^"]*"' "$1" 2>/dev/null | head -1 | sed 's/.*: *"//; s/"$//'; }
+
+                      # ---------------------------------------------------------------- Harness API
+                      # hx METHOD PATH SCOPE [CONTENT_TYPE BODY_FILE]; extra query string in $Q; sets $STATUS, body in $TMP/resp
+                      hx() {
+                        _qs="accountIdentifier=$HARNESS_ACCOUNT_ID"
+                        [ "$3" != account ] && _qs="$_qs&orgIdentifier=$ORG_ID"
+                        [ "$3" = project ] && _qs="$_qs&projectIdentifier=$PROJECT_ID"
+                        [ -n "${Q:-}" ] && _qs="$_qs&$Q"
+                        if [ -n "${5:-}" ]; then
+                          STATUS=$(curl -sS -o "$TMP/resp" -w '%{http_code}' -X "$1" -H "x-api-key: $HARNESS_API_KEY" \
+                            -H "Harness-Account: $HARNESS_ACCOUNT_ID" -H "Accept: application/json" -H "Content-Type: $4" \
+                            --data-binary "@$5" "$HARNESS_BASE_URL$2?$_qs") || die "$1 $2 failed"
+                        else
+                          STATUS=$(curl -sS -o "$TMP/resp" -w '%{http_code}' -X "$1" -H "x-api-key: $HARNESS_API_KEY" \
+                            -H "Harness-Account: $HARNESS_ACCOUNT_ID" -H "Accept: application/json" \
+                            "$HARNESS_BASE_URL$2?$_qs") || die "$1 $2 failed"
+                        fi
+                        Q=""
+                      }
+
+                      # exists PATH SCOPE [QUERY] -> 0 exists, 1 missing; dies on any other answer
+                      exists() {
+                        Q="${3:-}"; hx GET "$1" "$2"
+                        [ "$STATUS" = 200 ] && return 0
+                        if [ "$STATUS" = 404 ] || [ "$STATUS" = 400 ]; then
+                          grep -qiE 'not.?found|does not exist|doesn.t exist|not exist' "$TMP/resp" && return 1
+                        fi
+                        die "GET $1 returned HTTP $STATUS: $(json_msg "$TMP/resp")"
+                      }
+
+                      entity_exists() { # KIND ID
+                        case "$1" in
+                          service) exists "/ng/api/servicesV2/$2" project ;;
+                          pipeline) exists "/pipeline/api/pipelines/summary/$2" project ;;
+                          inputset) exists "/pipeline/api/pipelines/summary/$PIPELINE_ID" project &&
+                            exists "/pipeline/api/inputSets/$2" project "pipelineIdentifier=$PIPELINE_ID" ;;
+                          trigger) exists "/pipeline/api/pipelines/summary/$PIPELINE_ID" project &&
+                            exists "/pipeline/api/triggers/$2" project "targetIdentifier=$PIPELINE_ID" ;;
+                        esac
+                      }
+
+                      # ---------------------------------------------------------------- GitHub API
+                      gh() { # METHOD PATH [BODY_FILE] [ACCEPT]; sets $STATUS, body in $TMP/gh
+                        if [ -n "${3:-}" ]; then
+                          STATUS=$(curl -sS -o "$TMP/gh" -w '%{http_code}' -X "$1" -H "Authorization: token $GITHUB_TOKEN" \
+                            -H "Accept: ${4:-application/vnd.github+json}" --data-binary "@$3" "$GH_REPO$2") || die "GitHub $1 $2 failed"
+                        else
+                          STATUS=$(curl -sS -o "$TMP/gh" -w '%{http_code}' -X "$1" -H "Authorization: token $GITHUB_TOKEN" \
+                            -H "Accept: ${4:-application/vnd.github+json}" "$GH_REPO$2") || die "GitHub $1 $2 failed"
+                        fi
+                      }
+                      gh_field() { grep -o "\"$1\": *\"[^\"]*\"" "$TMP/gh" | head -1 | sed 's/.*: *"//; s/"$//'; }
+
+                      ensure_branch() { # BRANCH BASE
+                        gh GET "/git/ref/heads/$1"
+                        [ "$STATUS" = 200 ] && return 0
+                        gh GET "/git/ref/heads/$2"
+                        [ "$STATUS" = 200 ] || die "cannot read base branch $2 of $GITX_REPO: HTTP $STATUS $(json_msg "$TMP/gh")"
+                        printf '{"ref":"refs/heads/%s","sha":"%s"}' "$1" "$(gh_field sha)" > "$TMP/ref.json"
+                        gh POST /git/refs "$TMP/ref.json"
+                        [ "$STATUS" = 201 ] || [ "$STATUS" = 200 ] || die "cannot create branch $1: HTTP $STATUS $(json_msg "$TMP/gh")"
+                      }
+
+                      put_file() { # BRANCH REPO_PATH LOCAL_FILE MESSAGE -> prints committed|unchanged
+                        _sha=""
+                        gh GET "/contents/$2?ref=$(urlenc "$1")" "" application/vnd.github.raw
+                        if [ "$STATUS" = 200 ]; then
+                          cmp -s "$TMP/gh" "$3" && { echo unchanged; return 0; }
+                          gh GET "/contents/$2?ref=$(urlenc "$1")"
+                          _sha=$(gh_field sha)
+                        fi
+                        {
+                          printf '{"message":"%s","branch":"%s","content":"' "$(json_escape "$4")" "$1"
+                          base64 < "$3" | tr -d '\r\n'
+                          printf '"%s}' "${_sha:+,\"sha\":\"$_sha\"}"
+                        } > "$TMP/put.json"
+                        gh PUT "/contents/$2" "$TMP/put.json"
+                        [ "$STATUS" = 200 ] || [ "$STATUS" = 201 ] || die "cannot commit $2: HTTP $STATUS $(json_msg "$TMP/gh")"
+                        echo committed
+                      }
+
+                      ensure_pr() { # BRANCH BASE TITLE BODY -> prints "<state> <url>"
+                        gh GET "/pulls?state=open&head=$(urlenc "$GITHUB_OWNER:$1")&base=$(urlenc "$2")"
+                        _url=$(grep -o '"html_url": *"[^"]*/pull/[0-9]*"' "$TMP/gh" | head -1 | sed 's/.*: *"//; s/"$//')
+                        [ -n "$_url" ] && { echo "already-open $_url"; return 0; }
+                        printf '{"title":"%s","head":"%s","base":"%s","body":"%s"}' \
+                          "$(json_escape "$3")" "$1" "$2" "$(json_escape "$4")" > "$TMP/pr.json"
+                        gh POST /pulls "$TMP/pr.json"
+                        [ "$STATUS" = 201 ] || [ "$STATUS" = 200 ] || die "cannot open PR from $1: HTTP $STATUS $(json_msg "$TMP/gh")"
+                        echo "opened $(grep -o '"html_url": *"[^"]*/pull/[0-9]*"' "$TMP/gh" | head -1 | sed 's/.*: *"//; s/"$//')"
+                      }
+
+                      # ---------------------------------------------------------------- settings
+                      load_settings() {
+                        : "${HARNESS_BASE_URL:=https://app.harness.io/gateway}"
+                        need HARNESS_ACCOUNT_ID; need HARNESS_API_KEY
+                        : "${ORG_ID:=default}"; : "${OWNER_EMAIL:=}"; : "${DEPLOYMENT_TYPE:=Kubernetes}"
+                        : "${APP_GIT_CONNECTOR:=account.github}"; : "${MANIFEST_PATH:=}"; : "${REGISTRY_CONNECTOR:=account.harnessImage}"
+                        : "${IMAGE_PATH:=}"; : "${INPUT_OVERRIDES:=}"; : "${CREATE_TRIGGER:=true}"; : "${TRIGGER_BRANCH:=main}"
+                        : "${GITX_CONNECTOR:=account.github}"; : "${GITX_REPO:=harness-docs}"; : "${GITX_BRANCH:=main}"
+                        : "${GITHUB_API_URL:=https://api.github.com}"; : "${GITHUB_OWNER:=prameetu20codes}"; : "${GITHUB_TOKEN:=}"
+                        for _k in PROJECT_ID APP_NAME TEMPLATE_REF TEMPLATE_VERSION APP_REPO ENVIRONMENTS; do need "$_k"; done
+                        for _k in "$ORG_ID" "$PROJECT_ID"; do
+                          printf '%s' "$_k" | grep -Eq '^[a-zA-Z_][0-9a-zA-Z_]{0,127}$' || die "'$_k' is not a valid Harness identifier"
+                        done
+                        case "$DEPLOYMENT_TYPE" in Kubernetes | Ssh) ;; *) die "DEPLOYMENT_TYPE must be Kubernetes or Ssh" ;; esac
+                        [ "$DEPLOYMENT_TYPE" = Kubernetes ] && [ -z "$MANIFEST_PATH" ] && die "MANIFEST_PATH is required for Kubernetes services"
+                        [ -n "$IMAGE_PATH" ] || die "IMAGE_PATH is required"
+
+                        APP_ID=$(to_id "$APP_NAME") || exit 2
+                        BLUEPRINT=$(to_id "$(id_of "$TEMPLATE_REF")") || exit 2
+                        SERVICE_ID=$APP_ID
+                        PIPELINE_ID=$(printf '%s' "${APP_ID}_${BLUEPRINT}" | cut -c1-128)
+                        _tb=$(to_id "$TRIGGER_BRANCH") || exit 2
+                        TRIGGER_ID=$(printf '%s' "${APP_ID}_push_$_tb" | cut -c1-128)
+                        REQUEST_KEY="$ORG_ID/$PROJECT_ID/$APP_ID"
+                        PR_BRANCH="onboarding/$REQUEST_KEY"
+                        MANIFEST_FILE="onboarding/requests/$REQUEST_KEY.env"
+                        ROOT=".harness/orgs/$ORG_ID/projects/$PROJECT_ID"
+                        PIPE_DIR="$ROOT/pipelines/$PIPELINE_ID"
+                        GH_REPO="$GITHUB_API_URL/repos/$GITHUB_OWNER/$GITX_REPO"
+
+                        printf '%s' "$INPUT_OVERRIDES" | tr ',' '\n' | sed 's/^ *//; s/ *$//' | grep -v '^$' |
+                          sed "s/@{\([^}]*\)}/${LT}\1>/g" > "$TMP/overrides" || true
+                        while IFS= read -r _l; do
+                          case "$_l" in *=*) ;; *) die "INPUT_OVERRIDES entry '$_l' is not key=value" ;; esac
+                        done < "$TMP/overrides"
+                      }
+
+                      # ---------------------------------------------------------------- rendering
+                      render_service() {
+                        if [ "$DEPLOYMENT_TYPE" = Kubernetes ]; then
+                          cat > "$TMP/manifests" <<EOF
+                            manifests:
+                              - manifest:
+                                  identifier: ${APP_ID}_manifests
+                                  type: K8sManifest
+                                  spec:
+                                    store:
+                                      type: Github
+                                      spec:
+                                        connectorRef: $APP_GIT_CONNECTOR
+                                        gitFetchType: Branch
+                                        repoName: $APP_REPO
+                                        branch: $TRIGGER_BRANCH
+                                        paths:
+                                          - $MANIFEST_PATH
+                                    skipResourceVersioning: false
+                      EOF
+                          cat > "$TMP/artifact" <<EOF
+                                    type: DockerRegistry
+                                    spec:
+                                      connectorRef: $REGISTRY_CONNECTOR
+                                      imagePath: $IMAGE_PATH
+                                      tag: $RI
+                      EOF
+                        else
+                          : > "$TMP/manifests"
+                          cat > "$TMP/artifact" <<EOF
+                                    type: ArtifactoryRegistry
+                                    spec:
+                                      connectorRef: $REGISTRY_CONNECTOR
+                                      repository: $IMAGE_PATH
+                                      repositoryFormat: generic
+                                      artifactPath: $RI
+                      EOF
+                        fi
+                        {
+                          cat <<EOF
+                      service:
+                        name: $APP_NAME
+                        identifier: $SERVICE_ID
+                        orgIdentifier: $ORG_ID
+                        projectIdentifier: $PROJECT_ID
+                        description: Onboarded by app_team_onboarding
+                        tags:
+                          onboarded_by: app_team_onboarding
+                        serviceDefinition:
+                          type: $DEPLOYMENT_TYPE
+                          spec:
+                      EOF
+                          cat "$TMP/manifests"
+                          cat <<EOF
+                            artifacts:
+                              primary:
+                                primaryArtifactRef: primary
+                                sources:
+                                  - identifier: primary
+                      EOF
+                          cat "$TMP/artifact"
+                        } > "$1"
+                      }
+
+                      render_pipeline() {
+                        {
+                          cat <<EOF
+                      pipeline:
+                        name: $APP_NAME $BLUEPRINT
+                        identifier: $PIPELINE_ID
+                        orgIdentifier: $ORG_ID
+                        projectIdentifier: $PROJECT_ID
+                        tags:
+                          onboarded_by: app_team_onboarding
+                          blueprint: $BLUEPRINT
+                        template:
+                          templateRef: $TEMPLATE_REF
+                          versionLabel: "$TEMPLATE_VERSION"
+                      EOF
+                          if [ -s "$TMP/tplinputs" ]; then
+                            echo "    templateInputs:"
+                            indent 6 "$TMP/tplinputs"
+                          fi
+                        } > "$1"
+                      }
+
+                      # Replace `key: <input>` leaves with known values: serviceRef, environmentRef, override keys, and
+                      # `- name: X ... value: <input>` variables whose name X is an override key.
+                      fill_inputs() { # ENV_REF IN OUT
+                        awk -v svc="$SERVICE_ID" -v envref="$1" -v ri="$RI" -v ovf="$TMP/overrides" '
+                          BEGIN {
+                            while ((getline l < ovf) > 0) { p = index(l, "="); if (p) ov[substr(l, 1, p - 1)] = substr(l, p + 1) }
+                            vals["serviceRef"] = svc; vals["environmentRef"] = envref
+                            for (k in ov) vals[k] = ov[k]
+                          }
+                          {
+                            line = $0
+                            if (match(line, /^[ \t]*-[ \t]*name:[ \t]*/)) { n = substr(line, RLENGTH + 1); gsub(/"/, "", n); gsub(/[ \t]+$/, "", n); cur = n }
+                            v = line; sub(/^[ \t]*-?[ \t]*[A-Za-z_][A-Za-z0-9_]*:[ \t]*/, "", v); gsub(/"/, "", v); gsub(/[ \t]+$/, "", v)
+                            if (v == ri && match(line, /^[ \t]*-?[ \t]*[A-Za-z_][A-Za-z0-9_]*:/)) {
+                              pre = line; sub(/[A-Za-z_][A-Za-z0-9_]*:.*$/, "", pre)
+                              k = substr(line, length(pre) + 1); sub(/:.*/, "", k)
+                              if (k == "value" && (cur in ov)) line = pre "value: " ov[cur]
+                              else if (k != "value" && (k in vals)) line = pre k ": " vals[k]
+                            }
+                            print line
+                          }' "$2" > "$3"
+                      }
+
+                      render_input_set() { # ENV ID OUT -> prints unresolved count
+                        fill_inputs "$(env_ref "$1")" "$TMP/tplinputs" "$TMP/filled"
+                        {
+                          cat <<EOF
+                      inputSet:
+                        name: $APP_NAME $(id_of "$1")
+                        identifier: $2
+                        orgIdentifier: $ORG_ID
+                        projectIdentifier: $PROJECT_ID
+                        tags:
+                          onboarded_by: app_team_onboarding
+                        pipeline:
+                          identifier: $PIPELINE_ID
+                          template:
+                            templateInputs:
+                      EOF
+                          indent 8 "$TMP/filled"
+                        } > "$3"
+                        grep -oF "$RI" "$TMP/filled" | wc -l | tr -d ' '
+                      }
+
+                      render_trigger() { # INPUT_SET_ID OUT
+                        cat > "$2" <<EOF
+                      trigger:
+                        name: $APP_NAME push $TRIGGER_BRANCH
+                        identifier: $TRIGGER_ID
+                        enabled: true
+                        orgIdentifier: $ORG_ID
+                        projectIdentifier: $PROJECT_ID
+                        pipelineIdentifier: $PIPELINE_ID
+                        pipelineBranchName: $GITX_BRANCH
+                        inputSetRefs:
+                          - $1
+                        tags:
+                          onboarded_by: app_team_onboarding
+                        source:
+                          type: Webhook
+                          spec:
+                            type: Github
+                            spec:
+                              type: Push
+                              spec:
+                                connectorRef: $APP_GIT_CONNECTOR
+                                autoAbortPreviousExecutions: true
+                                repoName: $APP_REPO
+                                payloadConditions:
+                                  - key: targetBranch
+                                    operator: Equals
+                                    value: $TRIGGER_BRANCH
+                                headerConditions: []
+                                actions: []
+                      EOF
+                      }
+
+                      # ---------------------------------------------------------------- modes
+                      preflight() {
+                        echo "== Preflight $ORG_ID/$PROJECT_ID"
+                        exists "/ng/api/projects/$PROJECT_ID" org ||
+                          { err "project $PROJECT_ID does not exist in org $ORG_ID; create it before onboarding"; return; }
+                        Q="versionLabel=$(urlenc "$TEMPLATE_VERSION")"
+                        hx GET "/template/api/templates/templateInputs/$(id_of "$TEMPLATE_REF")" "$(scope_of "$TEMPLATE_REF")"
+                        [ "$STATUS" = 200 ] ||
+                          { err "template $TEMPLATE_REF@$TEMPLATE_VERSION not readable: $(json_msg "$TMP/resp")"; return; }
+                        json_str data "$TMP/resp" > "$TMP/tplraw"
+                        if head -1 "$TMP/tplraw" | grep -q '^templateInputs:'; then
+                          sed '1d; s/^  //' "$TMP/tplraw" > "$TMP/tplinputs"
+                        else
+                          cp "$TMP/tplraw" "$TMP/tplinputs"
+                        fi
+                        case "$(tr -d ' \t\r\n' < "$TMP/tplinputs")" in "" | "{}" | null) : > "$TMP/tplinputs" ;; esac
+                        for _c in $(printf '%s\n' "$GITX_CONNECTOR" "$APP_GIT_CONNECTOR" "$REGISTRY_CONNECTOR" | sort -u); do
+                          exists "/ng/api/connectors/$(id_of "$_c")" "$(scope_of "$_c")" || err "connector $_c not found"
+                        done
+                        for _e in $(printf '%s' "$ENVIRONMENTS" | tr ',' ' '); do
+                          _r=$(env_ref "$_e")
+                          exists "/ng/api/environmentsV2/$(id_of "$_r")" "$(scope_of "$_r")" || err "environment $_r not found"
+                        done
+                      }
+
+                      render_all() { # writes $TMP/entities: kind|id|repo_path|local_file, in creation order
+                        mkdir -p "$TMP/out"
+                        render_service "$TMP/out/service.yaml"
+                        render_pipeline "$TMP/out/pipeline.yaml"
+                        {
+                          echo "service|$SERVICE_ID|$ROOT/services/$SERVICE_ID.yaml|$TMP/out/service.yaml"
+                          echo "pipeline|$PIPELINE_ID|$ROOT/pipelines/$PIPELINE_ID.yaml|$TMP/out/pipeline.yaml"
+                        } > "$TMP/entities"
+                        [ -s "$TMP/tplinputs" ] || return 0
+                        _first=""
+                        for _e in $(printf '%s' "$ENVIRONMENTS" | tr ',' ' '); do
+                          _isid=$(to_id "${APP_ID}_$(id_of "$_e")") || exit 2
+                          _n=$(render_input_set "$_e" "$_isid" "$TMP/out/is_$_isid.yaml") || exit 2
+                          [ "$_n" -gt 0 ] && warn "input set $_isid: $_n runtime input(s) left open; set them with INPUT_OVERRIDES, or the trigger cannot run unattended"
+                          echo "inputset|$_isid|$PIPE_DIR/input_sets/$_isid.yaml|$TMP/out/is_$_isid.yaml" >> "$TMP/entities"
+                          [ -z "$_first" ] && _first=$_isid
+                        done
+                        if [ "$CREATE_TRIGGER" = true ]; then
+                          render_trigger "$_first" "$TMP/out/trigger.yaml"
+                          echo "trigger|$TRIGGER_ID|$PIPE_DIR/triggers/$TRIGGER_ID.yaml|$TMP/out/trigger.yaml" >> "$TMP/entities"
+                        fi
+                      }
+
+                      plan_or_propose() {
+                        load_settings
+                        preflight
+                        [ "$ERRORS" -eq 0 ] || { echo "ONBOARDING_REPORT mode=$MODE request=$REQUEST_KEY errors=$ERRORS"; exit 1; }
+                        echo "== $(echo "$MODE" | tr 'a-z' 'A-Z')  $GITX_REPO: $PR_BRANCH -> $GITX_BRANCH"
+                        render_all
+                        : > "$TMP/todo"
+                        while IFS='|' read -r _kind _id _path _file; do
+                          if entity_exists "$_kind" "$_id"; then
+                            row "$_kind" "$_id" "exists in Harness, left unchanged" "$_path"
+                          else
+                            echo "$_kind|$_id|$_path|$_file" >> "$TMP/todo"
+                            row "$_kind" "$_id" "would propose" "$_path"
+                            indent 6 "$_file"
+                          fi
+                        done < "$TMP/entities"
+
+                        if [ ! -s "$TMP/todo" ]; then
+                          echo "  nothing to propose: every entity already exists"
+                        elif [ "$MODE" = propose ]; then
+                          [ -n "$GITHUB_TOKEN" ] || die "GITHUB_TOKEN is required to push the onboarding branch and open the PR"
+                          echo "== Opening PR"
+                          ensure_branch "$PR_BRANCH" "$GITX_BRANCH"
+                          _msg="onboarding: $APP_NAME ($PROJECT_ID)"
+                          _files=""
+                          _md=""
+                          while IFS='|' read -r _kind _id _path _file; do
+                            _st=$(put_file "$PR_BRANCH" "$_path" "$_file" "$_msg") || exit 2
+                            row "$_kind" "$_id" "$_st" "$_path"
+                            _files="$_files$_kind|$_id|$_path
+                      "
+                            _md="$_md- \`$_kind\` **$_id**: \`$_path\`
+                      "
+                          done < "$TMP/todo"
+                          {
+                            for _k in ORG_ID PROJECT_ID APP_NAME OWNER_EMAIL TEMPLATE_REF TEMPLATE_VERSION DEPLOYMENT_TYPE APP_REPO \
+                              APP_GIT_CONNECTOR MANIFEST_PATH REGISTRY_CONNECTOR IMAGE_PATH ENVIRONMENTS CREATE_TRIGGER TRIGGER_BRANCH \
+                              GITX_CONNECTOR GITX_REPO GITX_BRANCH; do
+                              eval "_v=\${$_k}"
+                              echo "$_k=$(sq "$_v")"
+                            done
+                            echo "ONBOARD_FILES=$(sq "$_files")"
+                          } > "$TMP/manifest.env"
+                          put_file "$PR_BRANCH" "$MANIFEST_FILE" "$TMP/manifest.env" "$_msg" > /dev/null || exit 2
+                          _body="Onboarding request for **$APP_NAME** in \`$ORG_ID/$PROJECT_ID\`${OWNER_EMAIL:+ from $OWNER_EMAIL}.
+
+                      Blueprint: \`$TEMPLATE_REF@$TEMPLATE_VERSION\`
+
+                      Files:
+                      $_md
+                      Merging this PR registers these entities in Harness (\`app_team_onboarding_register\`). Closing it without merging creates nothing."
+                          _pr=$(ensure_pr "$PR_BRANCH" "$GITX_BRANCH" "Onboard $APP_NAME into $ORG_ID/$PROJECT_ID" "$_body") || exit 2
+                          echo "  PR ${_pr%% *}: ${_pr#* }"
+                        fi
+                        echo "ONBOARDING_REPORT mode=$MODE request=$REQUEST_KEY errors=$ERRORS"
+                        [ "$ERRORS" -eq 0 ] || exit 1
+                      }
+
+                      register() {
+                        need REQUEST; : "${REPO_DIR:=$PWD}"
+                        _req=${REQUEST#onboarding/}
+                        _mf="$REPO_DIR/onboarding/requests/$_req.env"
+                        [ -f "$_mf" ] || die "request manifest $_mf not found; was the PR merged?"
+                        # shellcheck disable=SC1090
+                        . "$_mf"
+                        load_settings
+                        echo "== REGISTER $REQUEST_KEY from $GITX_REPO@$GITX_BRANCH"
+                        _imp="connectorRef=$(urlenc "$GITX_CONNECTOR")&repoName=$(urlenc "$GITX_REPO")&branch=$(urlenc "$GITX_BRANCH")&isForceImport=false"
+                        printf '%s\n' "$ONBOARD_FILES" > "$TMP/files"
+                        while IFS='|' read -r _kind _id _path; do
+                          [ -n "$_kind" ] || continue
+                          if [ ! -f "$REPO_DIR/$_path" ]; then err "$_path is not on $GITX_BRANCH; was the PR merged?"; continue; fi
+                          if entity_exists "$_kind" "$_id"; then row "$_kind" "$_id" "exists in Harness, left unchanged" "$_path"; continue; fi
+                          _fp="filePath=$(urlenc "$_path")"
+                          case "$_kind" in
+                            service)
+                              printf '{"serviceName":"%s","serviceDescription":""}' "$(json_escape "$APP_NAME")" > "$TMP/body"
+                              Q="$_imp&$_fp&serviceIdentifier=$_id"; hx POST /ng/api/servicesV2/import project application/json "$TMP/body" ;;
+                            pipeline)
+                              printf '{"pipelineName":"%s","pipelineDescription":""}' "$(json_escape "$APP_NAME $BLUEPRINT")" > "$TMP/body"
+                              Q="$_imp&$_fp&pipelineIdentifier=$_id"; hx POST /pipeline/api/pipelines/import project application/json "$TMP/body" ;;
+                            inputset)
+                              printf '{"inputSetName":"%s","inputSetDescription":""}' "$_id" > "$TMP/body"
+                              Q="$_imp&$_fp&pipelineIdentifier=$PIPELINE_ID&inputSetIdentifier=$_id"
+                              hx POST /pipeline/api/inputSets/import project application/json "$TMP/body" ;;
+                            trigger)
+                              Q="targetIdentifier=$PIPELINE_ID"; hx POST /pipeline/api/triggers project application/yaml "$REPO_DIR/$_path" ;;
+                          esac
+                          case "$STATUS" in
+                            2??) [ "$_kind" = trigger ] && row "$_kind" "$_id" created "$_path" || row "$_kind" "$_id" imported "$_path" ;;
+                            *) row "$_kind" "$_id" "FAILED HTTP $STATUS" "$_path"; err "$_kind $_id: $(json_msg "$TMP/resp")"
+                               case "$_kind" in service | pipeline) break ;; esac ;;
+                          esac
+                        done < "$TMP/files"
+                        echo "ONBOARDING_REPORT mode=register request=$REQUEST_KEY errors=$ERRORS"
+                        [ "$ERRORS" -eq 0 ] || exit 1
+                      }
+
+                      if [ -z "${MODE:-}" ]; then
+                        if [ "${DRY_RUN:-true}" = false ]; then MODE=propose; else MODE=plan; fi
+                      fi
+                      case "$MODE" in
+                        plan | propose) plan_or_propose ;;
+                        register) register ;;
+                        *) die "MODE must be plan, propose or register" ;;
+                      esac
         variables:
           - name: HARNESS_CI_INTERNAL_ROUTE_TO_RUNNER
             type: String
